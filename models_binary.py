@@ -5,364 +5,368 @@ import numpy as np
 from torch.autograd import Variable
 import math
 
-
 PRIMITIVES_BINARY = ['plus', 'multiply', 'max', 'min', 'concat']
 PRIMITIVES_NAS = [0, 2, 4, 8, 16]
 SPACE_NAS = pow(len(PRIMITIVES_NAS), 5)
 OPS = {
-	'plus': lambda p, q: p + q,
-	'multiply': lambda p, q: p * q,
-	'max': lambda p, q: torch.max(torch.stack((p, q)), dim=0)[0],
-	'min': lambda p, q: torch.min(torch.stack((p, q)), dim=0)[0],
-	'concat': lambda p, q: torch.cat([p, q], dim=-1),
-	'norm_0': lambda p: torch.ones_like(p),
-	'norm_0.5': lambda p: torch.sqrt(torch.abs(p) + 1e-7),
-	'norm_1': lambda p: torch.abs(p),
-	'norm_2': lambda p: p ** 2,
-	'I': lambda p: torch.ones_like(p),
-	'-I': lambda p: -torch.ones_like(p),
-	'sign': lambda p: torch.sign(p),
+    'plus': lambda p, q: p + q,
+    'multiply': lambda p, q: p * q,
+    'max': lambda p, q: torch.max(torch.stack((p, q)), dim=0)[0],
+    'min': lambda p, q: torch.min(torch.stack((p, q)), dim=0)[0],
+    'concat': lambda p, q: torch.cat([p, q], dim=-1),
+    'norm_0': lambda p: torch.ones_like(p),
+    'norm_0.5': lambda p: torch.sqrt(torch.abs(p) + 1e-7),
+    'norm_1': lambda p: torch.abs(p),
+    'norm_2': lambda p: p ** 2,
+    'I': lambda p: torch.ones_like(p),
+    '-I': lambda p: -torch.ones_like(p),
+    'sign': lambda p: torch.sign(p),
 }
 
 
 def constrain(p):
-	c = torch.norm(p, p=2, dim=1, keepdim=True)
-	c[c < 1] = 1.0
-	p.data.div_(c)
+    c = torch.norm(p, p=2, dim=1, keepdim=True)
+    c[c < 1] = 1.0
+    p.data.div_(c)
 
 
 def MixedBinary(embedding_p, embedding_q, weights, FC):
-	return torch.sum(torch.stack([w * fc(OPS[primitive](embedding_p, embedding_q)) \
-		for w,primitive,fc in zip(weights,PRIMITIVES_BINARY,FC)]), 0)
+    return torch.sum(torch.stack([w * fc(OPS[primitive](embedding_p, embedding_q)) \
+                                  for w, primitive, fc in zip(weights, PRIMITIVES_BINARY, FC)]), 0)
 
 
 def _concat(xs):
-	return torch.cat([x.view(-1) for x in xs])
+    return torch.cat([x.view(-1) for x in xs])
 
 
 class Virtue(nn.Module):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(Virtue, self).__init__()
-		self.num_users = num_users
-		self.num_items = num_items
-		self.embedding_dim = embedding_dim
-		self.reg = reg
-		self._UsersEmbedding = nn.Embedding(num_users, embedding_dim)
-		self._ItemsEmbedding = nn.Embedding(num_items, embedding_dim)
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(Virtue, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_dim = embedding_dim
+        self.reg = reg
+        self._UsersEmbedding = nn.Embedding(num_users, embedding_dim)
+        self._ItemsEmbedding = nn.Embedding(num_items, embedding_dim)
 
-	def compute_loss(self, inferences, labels, regs):
-		labels = torch.reshape(labels, [-1,1])
-		loss = F.mse_loss(inferences, labels)
-		return loss + regs
+    def compute_loss(self, inferences, labels, regs):
+        labels = torch.reshape(labels, [-1, 1])
+        loss = F.mse_loss(inferences, labels)
+        return loss + regs
 
 
 class NCF(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(NCF, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = nn.Linear(embedding_dim, 1, bias=False)
-		self._W = nn.Linear(2*embedding_dim, embedding_dim)
-		# self._FC = nn.Sequential(
-		# 	nn.Linear(embedding_dim, embedding_dim),
-		# 	nn.Tanh(),
-		# 	nn.Linear(embedding_dim, 1, bias=False))
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(NCF, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = nn.Linear(embedding_dim, 1, bias=False)
+        self._W = nn.Linear(2 * embedding_dim, embedding_dim)
 
-	def forward(self, users, items):
-		constrain(next(self._FC.parameters()))
-		constrain(next(self._W.parameters()))
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    # self._FC = nn.Sequential(
+    # 	nn.Linear(embedding_dim, embedding_dim),
+    # 	nn.Tanh(),
+    # 	nn.Linear(embedding_dim, 1, bias=False))
 
-		gmf_out = users_embedding * items_embedding
-		mlp_out = self._W(torch.cat([users_embedding, items_embedding], dim=-1))
-		inferences = self._FC(F.tanh(gmf_out + mlp_out))
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+    def forward(self, users, items):
+        constrain(next(self._FC.parameters()))
+        constrain(next(self._W.parameters()))
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
+
+        gmf_out = users_embedding * items_embedding
+        mlp_out = self._W(torch.cat([users_embedding, items_embedding], dim=-1))
+        inferences = self._FC(F.tanh(gmf_out + mlp_out))
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class DeepWide(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(DeepWide, self).__init__(num_users, num_items, embedding_dim, reg)
-		# self._FC = nn.Linear(2*embedding_dim, 1, bias=False)
-		self._FC = nn.Sequential(
-			nn.Linear(2*embedding_dim, embedding_dim),
-			nn.ReLU(),
-			nn.Linear(embedding_dim, 1, bias=False))
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(DeepWide, self).__init__(num_users, num_items, embedding_dim, reg)
+        # self._FC = nn.Linear(2*embedding_dim, 1, bias=False)
+        self._FC = nn.Sequential(
+            nn.Linear(2 * embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, 1, bias=False))
 
-	def forward(self, users, items):
-		constrain(next(self._FC.parameters()))
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        constrain(next(self._FC.parameters()))
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = self._FC(torch.cat([users_embedding, items_embedding], dim=-1))
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = self._FC(torch.cat([users_embedding, items_embedding], dim=-1))
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class AltGrad(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(AltGrad, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = nn.Linear(embedding_dim, 1, bias=False)
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(AltGrad, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = nn.Linear(embedding_dim, 1, bias=False)
 
-	def forward(self, users, items):
-		constrain(next(self._FC.parameters()))
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        constrain(next(self._FC.parameters()))
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = self._FC(users_embedding * items_embedding)
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = self._FC(users_embedding * items_embedding)
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class ConvNCF(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(ConvNCF, self).__init__(num_users, num_items, embedding_dim, reg)
-		self.num_conv = int(math.log(embedding_dim, 2))
-		self._Conv = []
-		for i in range(self.num_conv-1):
-			self._Conv.append(nn.Conv2d(1, 1, kernel_size=3, stride=2, padding=1))
-			self._Conv.append(nn.ReLU())
-		self._Conv.append(nn.Conv2d(1, 1, kernel_size=3, stride=2, padding=1))
-		self._Conv = nn.Sequential(*self._Conv)
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(ConvNCF, self).__init__(num_users, num_items, embedding_dim, reg)
+        self.num_conv = int(math.log(embedding_dim, 2))
+        self._Conv = []
+        for i in range(self.num_conv - 1):
+            self._Conv.append(nn.Conv2d(1, 1, kernel_size=3, stride=2, padding=1))
+            self._Conv.append(nn.ReLU())
+        self._Conv.append(nn.Conv2d(1, 1, kernel_size=3, stride=2, padding=1))
+        self._Conv = nn.Sequential(*self._Conv)
 
-	def forward(self, users, items):
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		outer_result = torch.bmm(users_embedding.view(-1,self.embedding_dim,1), 
-			items_embedding.view(-1,1,self.embedding_dim))
+        outer_result = torch.bmm(users_embedding.view(-1, self.embedding_dim, 1),
+                                 items_embedding.view(-1, 1, self.embedding_dim))
 
-		outer_result = torch.unsqueeze(outer_result, 1)
+        outer_result = torch.unsqueeze(outer_result, 1)
 
-		inferences = self._Conv(outer_result).view(-1, 1)
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = self._Conv(outer_result).view(-1, 1)
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class Plus(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(Plus, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = nn.Linear(embedding_dim, 1, bias=False)
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(Plus, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = nn.Linear(embedding_dim, 1, bias=False)
 
-	def forward(self, users, items):
-		constrain(next(self._FC.parameters()))
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        constrain(next(self._FC.parameters()))
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = self._FC(users_embedding + items_embedding)
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = self._FC(users_embedding + items_embedding)
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class Max(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(Max, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = nn.Linear(embedding_dim, 1, bias=False)
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(Max, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = nn.Linear(embedding_dim, 1, bias=False)
 
-	def forward(self, users, items):
-		constrain(next(self._FC.parameters()))
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        constrain(next(self._FC.parameters()))
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = self._FC(OPS['max'](users_embedding, items_embedding))
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = self._FC(OPS['max'](users_embedding, items_embedding))
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class Min(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(Min, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = nn.Linear(embedding_dim, 1, bias=False)
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(Min, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = nn.Linear(embedding_dim, 1, bias=False)
 
-	def forward(self, users, items):
-		constrain(next(self._FC.parameters()))
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        constrain(next(self._FC.parameters()))
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = self._FC(OPS['min'](users_embedding, items_embedding))
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = self._FC(OPS['min'](users_embedding, items_embedding))
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class Conv(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(Conv, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = nn.Linear(embedding_dim, 1, bias=False)
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(Conv, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = nn.Linear(embedding_dim, 1, bias=False)
 
-	def forward(self, users, items):
-		constrain(next(self._FC.parameters()))
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        constrain(next(self._FC.parameters()))
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = []
-		for i in range(self.embedding_dim):
-			tmp = torch.zeros(users_embedding.size(0), 1, dtype=torch.float, device='cuda', requires_grad=False)
-			for j in range(i+1):
-				tmp += torch.reshape(users_embedding[:,j]*items_embedding[:,i-j], [-1,1])
-			inferences.append(tmp)
-		inferences = torch.cat(inferences, -1)
-		inferences = self._FC(inferences)
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = []
+        for i in range(self.embedding_dim):
+            tmp = torch.zeros(users_embedding.size(0), 1, dtype=torch.float, device='cuda', requires_grad=False)
+            for j in range(i + 1):
+                tmp += torch.reshape(users_embedding[:, j] * items_embedding[:, i - j], [-1, 1])
+            inferences.append(tmp)
+        inferences = torch.cat(inferences, -1)
+        inferences = self._FC(inferences)
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class Outer(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(Outer, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = nn.Linear(embedding_dim**2, 1, bias=False)
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(Outer, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = nn.Linear(embedding_dim ** 2, 1, bias=False)
 
-	def forward(self, users, items):
-		constrain(next(self._FC.parameters()))
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        constrain(next(self._FC.parameters()))
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = torch.bmm(users_embedding.view(-1,self.embedding_dim,1), 
-			items_embedding.view(-1,1,self.embedding_dim)).view(-1,self.embedding_dim**2)
-		inferences = self._FC(inferences)
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = torch.bmm(users_embedding.view(-1, self.embedding_dim, 1),
+                               items_embedding.view(-1, 1, self.embedding_dim)).view(-1, self.embedding_dim ** 2)
+        inferences = self._FC(inferences)
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class AutoNeural(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, reg):
-		super(AutoNeural, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = nn.Sequential(
-			nn.Linear(2*embedding_dim, 2*embedding_dim),
-			nn.Sigmoid(),
-			nn.Linear(2*embedding_dim, 1))
+    def __init__(self, num_users, num_items, embedding_dim, reg):
+        super(AutoNeural, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = nn.Sequential(
+            nn.Linear(2 * embedding_dim, 2 * embedding_dim),
+            nn.Sigmoid(),
+            nn.Linear(2 * embedding_dim, 1))
 
-	def forward(self, users, items):
-		for p in self._FC.parameters():
-			if len(p.size()) == 1: continue
-			constrain(p)
+    def forward(self, users, items):
+        for p in self._FC.parameters():
+            if len(p.size()) == 1: continue
+            constrain(p)
 
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = self._FC(torch.cat([users_embedding,items_embedding], dim=-1))
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        inferences = self._FC(torch.cat([users_embedding, items_embedding], dim=-1))
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
 
-		return inferences, regs
+        return inferences, regs
 
-	def embedding_parameters(self):
-		return list(self._UsersEmbedding.parameters()) + list(self._ItemsEmbedding.parameters())
+    def embedding_parameters(self):
+        return list(self._UsersEmbedding.parameters()) + list(self._ItemsEmbedding.parameters())
 
-	def mlp_parameters(self):
-		return self._FC.parameters()
+    def mlp_parameters(self):
+        return self._FC.parameters()
 
 
 class NAS(Virtue):
 
-	def __init__(self, num_users, num_items, embedding_dim, arch, reg):
-		super(NAS, self).__init__(num_users, num_items, embedding_dim, reg)
-		self._FC = []
+    def __init__(self, num_users, num_items, embedding_dim, arch, reg):
+        super(NAS, self).__init__(num_users, num_items, embedding_dim, reg)
+        self._FC = []
 
-		for i in range(len(arch)):
-			if i == 0:
-				self._FC.append(nn.Linear(2*embedding_dim, int(arch[i])))
-			else:
-				self._FC.append(nn.Linear(int(arch[i-1]), int(arch[i])))
-			self._FC.append(nn.ReLU())
-		if len(self._FC) == 0:
-			self._FC.append(nn.Linear(2*embedding_dim, 1, bias=False))
-		else:
-			self._FC.append(nn.Linear(arch[-1], 1, bias=False))
-		self._FC = nn.Sequential(*self._FC)
+        for i in range(len(arch)):
+            if i == 0:
+                self._FC.append(nn.Linear(2 * embedding_dim, int(arch[i])))
+            else:
+                self._FC.append(nn.Linear(int(arch[i - 1]), int(arch[i])))
+            self._FC.append(nn.ReLU())
+        if len(self._FC) == 0:
+            self._FC.append(nn.Linear(2 * embedding_dim, 1, bias=False))
+        else:
+            self._FC.append(nn.Linear(arch[-1], 1, bias=False))
+        self._FC = nn.Sequential(*self._FC)
 
-	def forward(self, users, items):
-		users_embedding = self._UsersEmbedding(users)
-		items_embedding = self._ItemsEmbedding(items)
+    def forward(self, users, items):
+        users_embedding = self._UsersEmbedding(users)
+        items_embedding = self._ItemsEmbedding(items)
 
-		inferences = self._FC(torch.cat([users_embedding, items_embedding], dim=-1))
-		regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
-		return inferences, regs
+        inferences = self._FC(torch.cat([users_embedding, items_embedding], dim=-1))
+        regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
+        return inferences, regs
 
 
 class Network(Virtue):
-    
+
     def __init__(self, num_users, num_items, embedding_dim, arch, reg):
         super(Network, self).__init__(num_users, num_items, embedding_dim, reg)
         self.arch = arch
         self.mlp_p = arch['mlp']['p']
         self.mlp_q = arch['mlp']['q']
-        
+
         if arch['binary'] == 'concat':
-            self._FC = nn.Linear(2*embedding_dim, 1, bias=False)
+            self._FC = nn.Linear(2 * embedding_dim, 1, bias=False)
         else:
             self._FC = nn.Linear(embedding_dim, 1, bias=False)
-    
+
     def parameters(self):
         return list(self._UsersEmbedding.parameters()) + list(self._ItemsEmbedding.parameters()) + \
-            list(self._FC.parameters())
-    
+               list(self._FC.parameters())
+
     def forward(self, users, items):
         constrain(next(self._FC.parameters()))
         users_embedding = self._UsersEmbedding(users)
         items_embedding = self._ItemsEmbedding(items)
-        
-        users_embedding_trans = self.mlp_p(users_embedding.view(-1,1)).view(users_embedding.size())
-        items_embedding_trans = self.mlp_q(items_embedding.view(-1,1)).view(items_embedding.size())
-        
+
+        users_embedding_trans = self.mlp_p(users_embedding.view(-1, 1)).view(users_embedding.size())
+        items_embedding_trans = self.mlp_q(items_embedding.view(-1, 1)).view(items_embedding.size())
+
         inferences = self._FC(OPS[self.arch['binary']](users_embedding_trans, items_embedding_trans))
         regs = self.reg * (torch.norm(users_embedding) + torch.norm(items_embedding))
         return inferences, regs
 
 
 class Network_Search(Virtue):
-    
+
     def __init__(self, num_users, num_items, embedding_dim, reg):
         super(Network_Search, self).__init__(num_users, num_items, embedding_dim, reg)
         self._FC = nn.ModuleList()
+        # 定义每一个IFC的系数w
         for primitive in PRIMITIVES_BINARY:
             if primitive == 'concat':
-                self._FC.append(nn.Linear(2*embedding_dim, 1, bias=False))
+                self._FC.append(nn.Linear(2 * embedding_dim, 1, bias=False))
             else:
                 self._FC.append(nn.Linear(embedding_dim, 1, bias=False))
         self._initialize_alphas()
-    
+
     def _initialize_alphas(self):
+        # 对应论文中的element-wise过程
         self.mlp_p = nn.Sequential(
-			nn.Linear(1, 8),
-			nn.Tanh(),
-			nn.Linear(8, 1)).cuda()
+            nn.Linear(1, 8),
+            nn.Tanh(),
+            nn.Linear(8, 1)).cuda()
         self.mlp_q = nn.Sequential(
-			nn.Linear(1, 8),
-			nn.Tanh(),
+            nn.Linear(1, 8),
+            nn.Tanh(),
             nn.Linear(8, 1)).cuda()
         self._arch_parameters = {}
         self._arch_parameters['mlp'] = {}
         self._arch_parameters['mlp']['p'] = self.mlp_p
         self._arch_parameters['mlp']['q'] = self.mlp_q
-        self._arch_parameters['binary'] = Variable(torch.ones(len(PRIMITIVES_BINARY), 
-            dtype=torch.float, device='cuda') / 2, requires_grad=True)
+        # 初始化alpha矩阵
+        self._arch_parameters['binary'] = Variable(torch.ones(len(PRIMITIVES_BINARY),
+                                                              dtype=torch.float, device='cuda') / 2, requires_grad=True)
         self._arch_parameters['binary'].data.add_(
-            torch.randn_like(self._arch_parameters['binary'])*1e-3)
-    
+            torch.randn_like(self._arch_parameters['binary']) * 1e-3)
+
     def arch_parameters(self):
         return list(self._arch_parameters['mlp']['p'].parameters()) + \
-            list(self._arch_parameters['mlp']['q'].parameters()) + [self._arch_parameters['binary']]
-    
+               list(self._arch_parameters['mlp']['q'].parameters()) + [self._arch_parameters['binary']]
+
     def new(self):
         model_new = Network_Search(self.num_users, self.num_items, self.embedding_dim, self.reg).cuda()
         for x, y in zip(model_new.arch_parameters(), self.arch_parameters()):
             x.data = y.data.clone()
         return model_new
-    
+
     def clip(self):
         m = nn.Hardtanh(0, 1)
         self._arch_parameters['binary'].data = m(self._arch_parameters['binary'])
-    
+
     def binarize(self):
+        # 在01化之前先存储
         self._cache = self._arch_parameters['binary'].clone()
         max_index = self._arch_parameters['binary'].argmax().item()
         for i in range(self._arch_parameters['binary'].size(0)):
@@ -370,20 +374,23 @@ class Network_Search(Virtue):
                 self._arch_parameters['binary'].data[i] = 1.0
             else:
                 self._arch_parameters['binary'].data[i] = 0.0
-    
+
     def recover(self):
         self._arch_parameters['binary'].data = self._cache
         del self._cache
 
     def forward(self, users, items):
         for i in range(len(PRIMITIVES_BINARY)):
+            # 把参数w的二范数限制小于1
             constrain(next(self._FC[i].parameters()))
 
         users_embedding = self._UsersEmbedding(users)
         items_embedding = self._ItemsEmbedding(items)
 
-        users_embedding_trans = self._arch_parameters['mlp']['p'](users_embedding.view(-1,1)).view(users_embedding.size())
-        items_embedding_trans = self._arch_parameters['mlp']['q'](items_embedding.view(-1,1)).view(items_embedding.size())
+        users_embedding_trans = self._arch_parameters['mlp']['p'](users_embedding.view(-1, 1)).view(
+            users_embedding.size())
+        items_embedding_trans = self._arch_parameters['mlp']['q'](items_embedding.view(-1, 1)).view(
+            items_embedding.size())
 
         # the weight is already binarized
         assert self._arch_parameters['binary'].sum() == 1.
@@ -398,98 +405,99 @@ class Network_Search(Virtue):
         genotype_p = F.softmax(self._arch_parameters['binary'], dim=-1)
         return genotype, genotype_p.cpu().detach()
 
-    def step(self, users_train, items_train, labels_train, users_valid, 
-		items_valid, labels_valid, lr, arch_optimizer, unrolled):
+    def step(self, users_train, items_train, labels_train, users_valid,
+             items_valid, labels_valid, lr, arch_optimizer, unrolled):
+        # 与NASP不同的是，step过程里还是计算了二阶梯度
+
         self.zero_grad()
         arch_optimizer.zero_grad()
 
         # binarize before forward propagation
+        # 对应论文里Algorithm2的第3步，α^' = prox_C(α)
         self.binarize()
+
         if unrolled:
+            # 用论文的提出的方法，bilevel optimization，需要计算二阶梯度
+            # 需要计算α - eta * (d_{α^} H(T,S))
             loss = self._backward_step_unrolled(users_train, items_train, labels_train,
-				users_valid, items_valid, labels_valid, lr)
+                                                users_valid, items_valid, labels_valid, lr)
         else:
+            # 不用论文提出的bilevel optimization，只是简单的对α求导，其实就是first order
             loss = self._backward_step(users_valid, items_valid, labels_valid)
         # restore weight before updating
         self.recover()
+        # 根据更新alpha
         arch_optimizer.step()
         return loss
-    
+
     def _backward_step(self, users_valid, items_valid, labels_valid):
         inferences, regs = self(users_valid, items_valid)
         loss = self.compute_loss(inferences, labels_valid, regs)
         loss.backward()
         return loss
-    
+
     def _backward_step_unrolled(self, users_train, items_train, labels_train,
-		users_valid, items_valid, labels_valid, lr):
+                                users_valid, items_valid, labels_valid, lr):
+        """
+        不直接用外面的optimizer来进行α的更新，
+        而是自己新建一个unrolled_model展开利用训练集对α更新计算α - eta * (d_{α^} H(T,S))
+        逻辑几乎和DARTS中一样，其实就是计算一个二阶梯度
+        """
         unrolled_model = self._compute_unrolled_model(
-			users_train, items_train, labels_train, lr)
+            users_train, items_train, labels_train, lr)
         unrolled_inference, unrolled_regs = unrolled_model(users_valid, items_valid)
         unrolled_loss = unrolled_model.compute_loss(unrolled_inference, labels_valid, unrolled_regs)
-        
+
         unrolled_loss.backward()
         dalpha = [v.grad for v in unrolled_model.arch_parameters()]
         vector = [v.grad for v in unrolled_model.parameters()]
         implicit_grads = self._hessian_vector_product(vector, users_train, items_train, labels_train)
-        
-        for g,ig in zip(dalpha,implicit_grads):
+
+        for g, ig in zip(dalpha, implicit_grads):
             g.sub_(lr, ig)
-        
-        for v,g in zip(self.arch_parameters(), dalpha):
+
+        for v, g in zip(self.arch_parameters(), dalpha):
             v.grad = g.clone()
         return unrolled_loss
-    
+
     def _compute_unrolled_model(self, users_train, items_train, labels_train, lr):
         inferences, regs = self(users_train, items_train)
         loss = self.compute_loss(inferences, labels_train, regs)
         theta = _concat(self.parameters())
         dtheta = _concat(torch.autograd.grad(loss, self.parameters())) + self.reg * theta
+        # 对T进行更新，等价于optimizer.step()
         unrolled_model = self._construct_model_from_theta(theta.sub(lr, dtheta))
         return unrolled_model
-    
+
     def _construct_model_from_theta(self, theta):
         model_new = self.new()
         model_dict = self.state_dict()
         params, offset = {}, 0
-        for k,v in self.named_parameters():
+        for k, v in self.named_parameters():
             v_length = np.prod(v.size())
-            params[k] = theta[offset: offset+v_length].view(v.size())
+            params[k] = theta[offset: offset + v_length].view(v.size())
             offset += v_length
 
         assert offset == len(theta)
         model_dict.update(params)
         model_new.load_state_dict(model_dict)
         return model_new.cuda()
-    
+
     def _hessian_vector_product(self, vector, users, items, labels, r=1e-2):
         R = r / _concat(vector).norm()
-        for p,v in zip(self.parameters(), vector):
+        for p, v in zip(self.parameters(), vector):
             p.data.add_(R, v)
         inferences, regs = self(users, items)
         loss = self.compute_loss(inferences, labels, regs)
         grads_p = torch.autograd.grad(loss, self.arch_parameters())
 
-        for p,v in zip(self.parameters(), vector):
-            p.data.sub_(2*R, v)
+        for p, v in zip(self.parameters(), vector):
+            p.data.sub_(2 * R, v)
         inferences, regs = self(users, items)
         loss = self.compute_loss(inferences, labels, regs)
         grads_n = torch.autograd.grad(loss, self.arch_parameters())
 
-        for p,v in zip(self.parameters(), vector):
+        for p, v in zip(self.parameters(), vector):
             p.data.add_(R, v)
 
-        return [(x-y).div_(2*R) for x,y in zip(grads_p,grads_n)]
-
-
-
-
-
-
-    
-
-
-
-
-
-
+        return [(x - y).div_(2 * R) for x, y in zip(grads_p, grads_n)]

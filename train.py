@@ -23,6 +23,7 @@ def train_search(train_queue, valid_queue, model, optimizer, arch_optimizer, arg
 		items_valid = items_valid.cuda()
 		labels_valid = labels_valid.cuda()
 
+		# 对应论文里的algorithm2里的第3-6步
 		if args.mode == 'sif-no-auto':
 			loss_valid = model.step(users_train, items_train, labels_train, users_train,
 				items_train, labels_train, args.lr, arch_optimizer, args.unrolled)
@@ -32,10 +33,13 @@ def train_search(train_queue, valid_queue, model, optimizer, arch_optimizer, arg
 		optimizer.zero_grad()
 		arch_optimizer.zero_grad()
 
+		# 对应论文里的algorithm2第8步，α^' = prox_C(α)
 		model.binarize()
+		# 对应 algorithm2 里读9步，开始更新 T = (U, V, w)
 		inferences, regs = model(users_train, items_train)
 		loss = model.compute_loss(inferences, labels_train, regs)
 		loss.backward()
+		# 恢复α的连续值
 		model.recover()
 		nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 		optimizer.step()
